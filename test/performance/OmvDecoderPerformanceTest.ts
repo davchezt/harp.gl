@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Theme } from "@here/harp-datasource-protocol";
+import { Theme, ValueMap } from "@here/harp-datasource-protocol";
 import { MapEnv, StyleSetEvaluator } from "@here/harp-datasource-protocol/index-decoder";
 import { apikey } from "@here/harp-examples/config";
 import {
@@ -14,7 +14,7 @@ import {
     webMercatorProjection
 } from "@here/harp-geoutils";
 import { ThemeLoader } from "@here/harp-mapview";
-import { getTestResourceUrl } from "@here/harp-test-utils";
+import { getTestResourceUrl } from "@here/harp-test-utils/index.node";
 import { measurePerformanceSync } from "@here/harp-test-utils/lib/ProfileHelper";
 import {
     APIFormat,
@@ -31,6 +31,14 @@ import {
 } from "@here/harp-vectortile-datasource/lib/IGeometryProcessor";
 import { VectorTileDataProcessor } from "@here/harp-vectortile-datasource/lib/VectorTileDecoder";
 import { assert } from "chai";
+
+if (typeof window === "undefined") {
+    const perfHooks = require("perf_hooks");
+
+    (global as any).performance = perfHooks.performance;
+    (global as any).PerformanceObserver = perfHooks.PerformanceObserver;
+    (global as any).PerformanceEntry = perfHooks.PerformanceEntry;
+}
 
 export interface OMVDecoderPerformanceTestOptions {
     /**
@@ -107,40 +115,41 @@ export function createOMVDecoderPerformanceTest(
             });
 
             const geometryProcessor: IGeometryProcessor = {
-                storageLevelOffset: 0,
-
                 processPointFeature(
                     layerName: string,
-                    layerExtents: number,
+                    tileExtents: number,
                     geometry: THREE.Vector3[],
-                    env: MapEnv
+                    properties: ValueMap
                 ) {
+                    const env = new MapEnv(properties);
                     styleSetEvaluator.getMatchingTechniques(env, layerName, "point");
                 },
                 processLineFeature(
                     layerName: string,
-                    layerExtents: number,
+                    tileExtents: number,
                     geometry: ILineGeometry[],
-                    env: MapEnv
+                    properties: ValueMap
                 ) {
+                    const env = new MapEnv(properties);
                     styleSetEvaluator.getMatchingTechniques(env, layerName, "line");
                 },
 
                 processPolygonFeature(
                     layerName: string,
-                    layerExtents: number,
+                    tileExtents: number,
                     geometry: IPolygonGeometry[],
-                    env: MapEnv
+                    properties: ValueMap
                 ) {
+                    const env = new MapEnv(properties);
                     styleSetEvaluator.getMatchingTechniques(env, layerName, "polygon");
                 }
             };
 
             await measurePerformanceSync(counterName, repeats, function () {
                 for (const [tileKey, tileData] of omvTiles) {
-                    const decoder = new OmvDataAdapter(geometryProcessor, undefined);
-                    const decodeInfo = new DecodeInfo("profiler", mercatorProjection, tileKey, 0);
-                    decoder.process(tileData, decodeInfo);
+                    const decoder = new OmvDataAdapter();
+                    const decodeInfo = new DecodeInfo(mercatorProjection, tileKey, 0);
+                    decoder.process(tileData, decodeInfo, geometryProcessor);
                 }
             });
         });
@@ -159,11 +168,12 @@ export function createOMVDecoderPerformanceTest(
             await measurePerformanceSync(counterName, repeats, function () {
                 for (const [tileKey, tileData] of omvTiles) {
                     const decoder = new VectorTileDataProcessor(
+                        tileKey,
                         projection,
                         styleSetEvaluator,
-                        false
+                        new OmvDataAdapter()
                     );
-                    decoder.getDecodedTile(tileKey, tileData);
+                    decoder.getDecodedTile(tileData);
                 }
             });
         });
@@ -183,11 +193,12 @@ export function createOMVDecoderPerformanceTest(
             await measurePerformanceSync(counterName, repeats, function () {
                 for (const [tileKey, tileData] of omvTiles) {
                     const decoder = new VectorTileDataProcessor(
+                        tileKey,
                         projection,
                         styleSetEvaluator,
-                        false
+                        new OmvDataAdapter()
                     );
-                    decoder.getDecodedTile(tileKey, tileData);
+                    decoder.getDecodedTile(tileData);
                 }
             });
         });

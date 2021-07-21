@@ -13,13 +13,13 @@ import {
     isExtrudedLineTechnique,
     isExtrudedPolygonTechnique,
     isShaderTechnique,
-    isStandardTechnique,
-    isTerrainTechnique,
     isTextureBuffer,
     parseStringEncodedColor,
     ShaderTechnique,
+    supportsTextures,
     Technique,
     TEXTURE_PROPERTY_KEYS,
+    TextureBuffer,
     TextureProperties,
     TRANSPARENCY_PROPERTY_KEYS,
     Value
@@ -85,22 +85,152 @@ export interface MaterialOptions {
     shadowsEnabled?: boolean;
 }
 
+function createTextureFromURL(
+    url: string,
+    onLoad: (texture: THREE.Texture) => void,
+    onError: (error: ErrorEvent | string) => void,
+    isObjectURL: boolean
+) {
+    const texture = new THREE.TextureLoader().load(
+        url,
+        onLoad,
+        undefined, // onProgress
+        onError
+    );
+
+    if (isObjectURL) {
+        // Remove object URL on dispose to avoid memory leaks.
+        texture.addEventListener("dispose", () => {
+            URL.revokeObjectURL(url);
+        });
+    }
+}
+
+function createTextureFromRawImage(
+    textureBuffer: TextureBuffer,
+    onLoad: (texture: THREE.Texture) => void,
+    onError: (error: ErrorEvent | string) => void
+) {
+    const properties = textureBuffer.dataTextureProperties;
+    if (properties) {
+        const textureDataType: THREE.TextureDataType | undefined = properties.type
+            ? toTextureDataType(properties.type)
+            : undefined;
+        const buffer = getTextureBuffer(textureBuffer.buffer, textureDataType);
+
+        const texture = new THREE.DataTexture(
+            buffer,
+            properties.width,
+            properties.height,
+            properties.format ? toPixelFormat(properties.format) : undefined,
+            textureDataType
+        );
+        onLoad(texture);
+    } else {
+        onError("no data texture properties provided.");
+    }
+}
+
+function initTextureProperties(texture: THREE.Texture, properties?: TextureProperties) {
+    if (!properties) {
+        return;
+    }
+    if (properties.wrapS !== undefined) {
+        texture.wrapS = toWrappingMode(properties.wrapS);
+    }
+    if (properties.wrapT !== undefined) {
+        texture.wrapT = toWrappingMode(properties.wrapT);
+    }
+    if (properties.magFilter !== undefined) {
+        texture.magFilter = toTextureFilter(properties.magFilter);
+    }
+    if (properties.minFilter !== undefined) {
+        texture.minFilter = toTextureFilter(properties.minFilter);
+    }
+    if (properties.flipY !== undefined) {
+        texture.flipY = properties.flipY;
+    }
+    if (properties.repeatU !== undefined) {
+        texture.repeat.x = properties.repeatU;
+    }
+    if (properties.repeatV !== undefined) {
+        texture.repeat.y = properties.repeatV;
+    }
+}
+
+function createTexture(
+    material: THREE.Material,
+    texturePropertyName: string,
+    options: MaterialOptions
+): Promise<THREE.Texture> | undefined {
+    const technique = options.technique;
+    let textureProperty = (technique as any)[texturePropertyName];
+    if (textureProperty === undefined) {
+        return undefined;
+    }
+
+    const texturePromise = new Promise<THREE.Texture>((resolve, reject) => {
+        const onLoad = (texture: THREE.Texture) => {
+            const properties: TextureProperties | undefined = (technique as any)[
+                texturePropertyName + "Properties"
+            ];
+            initTextureProperties(texture, properties);
+            (material as any)[texturePropertyName] = texture;
+            material.needsUpdate = true;
+            resolve(texture);
+        };
+        const onError = (error: ErrorEvent | string) => {
+            logger.error("#createMaterial: Failed to load texture: ", error);
+            reject(error);
+        };
+
+        if (Expr.isExpr(textureProperty)) {
+            textureProperty = getPropertyValue(textureProperty, options.env);
+            if (!textureProperty) {
+                // Expression may evaluate to a valid texture at any time, create a fake texture to
+                // avoid shader recompilation.
+                onLoad(new THREE.Texture());
+                return;
+            }
+        }
+
+        if (typeof textureProperty === "string") {
+            createTextureFromURL(textureProperty, onLoad, onError, false);
+        } else if (isTextureBuffer(textureProperty)) {
+            if (textureProperty.type === "image/raw") {
+                createTextureFromRawImage(textureProperty, onLoad, onError);
+            } else {
+                const textureBlob = new Blob([textureProperty.buffer], {
+                    type: textureProperty.type
+                });
+                createTextureFromURL(URL.createObjectURL(textureBlob), onLoad, onError, true);
+            }
+        } else if (
+            typeof textureProperty === "object" &&
+            (textureProperty.nodeName === "IMG" || textureProperty.nodeName === "CANVAS")
+        ) {
+            onLoad(new THREE.CanvasTexture(textureProperty));
+        }
+    });
+    return texturePromise;
+}
+
 /**
  * Create a material, depending on the rendering technique provided in the options.
  *
  * @param rendererCapabilities - The capabilities of the renderer that will use the material.
  * @param options - The material options the subsequent functions need.
- * @param materialUpdateCallback - Optional callback when the material gets updated,
- *                               e.g. after texture loading.
+ * @param onTextureCreated - Optional callback for each texture created for the material, getting
+ * a promise that will be resolved once the texture is loaded. Texture is not uploaded to GPU.
  *
- * @returns new material instance that matches `technique.name`
+ * @returns new material instance that matches `technique.name`.
  *
  * @internal
  */
 export function createMaterial(
     rendererCapabilities: THREE.WebGLCapabilities,
     options: MaterialOptions,
-    textureReadyCallback?: (texture: THREE.Texture) => void
+    onTextureCreated?: (texture: Promise<THREE.Texture>) => void
 ): THREE.Material | undefined {
     const technique = options.technique;
     const Constructor = getMaterialConstructor(technique, options.shadowsEnabled === true);
@@ -133,98 +263,11 @@ export function createMaterial(
 
     material.depthTest = isExtrudedPolygonTechnique(technique) && technique.depthTest !== false;
 
-    if (
-        isStandardTechnique(technique) ||
-        isTerrainTechnique(technique) ||
-        isExtrudedPolygonTechnique(technique)
-    ) {
+    if (supportsTextures(technique)) {
         TEXTURE_PROPERTY_KEYS.forEach((texturePropertyName: string) => {
-            const textureProperty = (technique as any)[texturePropertyName];
-            if (textureProperty === undefined) {
-                return;
-            }
-
-            const onLoad = (texture: THREE.Texture) => {
-                const properties = (technique as any)[
-                    texturePropertyName + "Properties"
-                ] as TextureProperties;
-                if (properties !== undefined) {
-                    if (properties.wrapS !== undefined) {
-                        texture.wrapS = toWrappingMode(properties.wrapS);
-                    }
-                    if (properties.wrapT !== undefined) {
-                        texture.wrapT = toWrappingMode(properties.wrapT);
-                    }
-                    if (properties.magFilter !== undefined) {
-                        texture.magFilter = toTextureFilter(properties.magFilter);
-                    }
-                    if (properties.minFilter !== undefined) {
-                        texture.minFilter = toTextureFilter(properties.minFilter);
-                    }
-                    if (properties.flipY !== undefined) {
-                        texture.flipY = properties.flipY;
-                    }
-                    if (properties.repeatU !== undefined) {
-                        texture.repeat.x = properties.repeatU;
-                    }
-                    if (properties.repeatV !== undefined) {
-                        texture.repeat.y = properties.repeatV;
-                    }
-                }
-                (material as any)[texturePropertyName] = texture;
-                texture.needsUpdate = true;
-                material.needsUpdate = true;
-
-                if (textureReadyCallback) {
-                    textureReadyCallback(texture);
-                }
-            };
-
-            const onError = (error: ErrorEvent | string) => {
-                logger.error("#createMaterial: Failed to load texture: ", error);
-            };
-
-            let textureUrl: string | undefined;
-            if (typeof textureProperty === "string") {
-                textureUrl = textureProperty;
-            } else if (isTextureBuffer(textureProperty)) {
-                if (textureProperty.type === "image/raw") {
-                    const properties = textureProperty.dataTextureProperties;
-                    if (properties !== undefined) {
-                        const textureDataType: THREE.TextureDataType | undefined = properties.type
-                            ? toTextureDataType(properties.type)
-                            : undefined;
-                        const textureBuffer = getTextureBuffer(
-                            textureProperty.buffer,
-                            textureDataType
-                        );
-
-                        const texture = new THREE.DataTexture(
-                            textureBuffer,
-                            properties.width,
-                            properties.height,
-                            properties.format ? toPixelFormat(properties.format) : undefined,
-                            textureDataType
-                        );
-                        onLoad(texture);
-                    } else {
-                        onError("no data texture properties provided.");
-                    }
-                } else {
-                    const textureBlob = new Blob([textureProperty.buffer], {
-                        type: textureProperty.type
-                    });
-                    textureUrl = URL.createObjectURL(textureBlob);
-                }
-            }
-
-            if (textureUrl) {
-                new THREE.TextureLoader().load(
-                    textureUrl,
-                    onLoad,
-                    undefined, // onProgress
-                    onError
-                );
+            const texturePromise = createTexture(material, texturePropertyName, options);
+            if (texturePromise) {
+                onTextureCreated?.(texturePromise);
             }
         });
     }

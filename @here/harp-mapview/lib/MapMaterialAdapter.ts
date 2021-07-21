@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ColorUtils, Expr, getPropertyValue, Value } from "@here/harp-datasource-protocol";
+import {
+    ColorUtils,
+    Expr,
+    getPropertyValue,
+    TEXTURE_PROPERTY_KEYS,
+    Value
+} from "@here/harp-datasource-protocol";
 import { disableBlending, enableBlending, RawShaderMaterial } from "@here/harp-materials";
 import * as THREE from "three";
 
@@ -33,6 +39,10 @@ export type StylePropertyEvaluator = (context: MapAdapterUpdateEnv) => Value;
  */
 export interface StyledProperties {
     [name: string]: Expr | StylePropertyEvaluator | Value | undefined;
+}
+
+function isTextureProperty(propertyName: string): boolean {
+    return TEXTURE_PROPERTY_KEYS.includes(propertyName);
 }
 
 /**
@@ -99,6 +109,7 @@ export class MapMaterialAdapter {
 
     private m_lastUpdateFrameNumber = -1;
     private readonly m_dynamicProperties: Array<[string, Expr | StylePropertyEvaluator]>;
+    private readonly tmpColor = new THREE.Color();
 
     constructor(material: THREE.Material, styledProperties: StyledProperties) {
         this.material = material;
@@ -163,7 +174,8 @@ export class MapMaterialAdapter {
             }
             if (propName === "color" || propName === "opacity") {
                 updateBaseColor = true;
-            } else {
+            } else if (!isTextureProperty(propName)) {
+                // Static textures are already set in the material during tile construction.
                 this.applyMaterialGenericProp(propName, currentValue);
             }
         }
@@ -194,6 +206,9 @@ export class MapMaterialAdapter {
                 // `color` and `opacity` are special properties to support RGBA
                 if (propName === "color" || propName === "opacity") {
                     updateBaseColor = true;
+                } else if (isTextureProperty(propName)) {
+                    this.applyMaterialTextureProp(propName, newValue);
+                    somethingChanged = true;
                 } else {
                     this.applyMaterialGenericProp(propName, newValue);
                     somethingChanged = true;
@@ -210,6 +225,49 @@ export class MapMaterialAdapter {
         return somethingChanged;
     }
 
+    private applyMaterialTextureProp(propName: string, value: Value) {
+        const m = this.material as any;
+        // Wait until the texture is loaded for the first time on tile creation, that way,
+        // the old texture properties can be copied to the new texture.
+        if (!m[propName] || value === null) {
+            return;
+        }
+        const oldTexture = m[propName];
+        let newTexture: THREE.Texture | undefined;
+
+        if (typeof value === "string") {
+            newTexture = new THREE.TextureLoader().load(value, (texture: THREE.Texture) => {
+                m[propName] = texture;
+            });
+        } else if (typeof value === "object") {
+            const element = value as any;
+            const isImage = element.nodeName === "IMG";
+            const isCanvas = element.nodeName === "CANVAS";
+            if (isImage || isCanvas) {
+                newTexture = new THREE.CanvasTexture(element);
+
+                if (isImage && !element.complete) {
+                    const onLoad = () => {
+                        m[propName] = newTexture;
+                        element.removeEventListener("load", onLoad);
+                    };
+                    element.addEventListener("load", onLoad);
+                } else {
+                    m[propName] = newTexture;
+                }
+            }
+        }
+
+        if (newTexture) {
+            newTexture.wrapS = oldTexture.wrapS;
+            newTexture.wrapT = oldTexture.wrapT;
+            newTexture.magFilter = oldTexture.magFilter;
+            newTexture.minFilter = oldTexture.minFilter;
+            newTexture.flipY = oldTexture.flipY;
+            newTexture.repeat = oldTexture.repeat;
+        }
+    }
+
     private applyMaterialGenericProp(propName: string, value: Value) {
         const m = this.material as any;
         if (m[propName] instanceof THREE.Color) {
@@ -222,10 +280,13 @@ export class MapMaterialAdapter {
                 colorValue = parsed;
             }
             const rgbValue = ColorUtils.removeAlphaFromHex(colorValue);
-            m[propName].set(rgbValue);
-        } else {
-            m[propName] = value;
+            this.tmpColor.set(rgbValue);
+            // We set the value, i.e. using =, as opposed to setting the color directly using set
+            // because the material may be a custom material with a setter.
+            value = this.tmpColor;
         }
+
+        m[propName] = value;
     }
 
     private applyMaterialBaseColor(color: Value, opacity: number | undefined) {

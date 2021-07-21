@@ -8,8 +8,7 @@ import { GeoJsonDataProvider } from "@here/harp-geojson-datasource";
 import { LookAtParams, MapView, MapViewEventNames } from "@here/harp-mapview";
 import { DataProvider } from "@here/harp-mapview-decoder";
 import { GeoJsonTiler } from "@here/harp-mapview-decoder/index-worker";
-import { waitForEvent } from "@here/harp-test-utils";
-import { RenderingTestHelper } from "@here/harp-test-utils/index.web";
+import { RenderingTestHelper, waitForEvent } from "@here/harp-test-utils";
 import { VectorTileDataSource } from "@here/harp-vectortile-datasource";
 import { VectorTileDecoder } from "@here/harp-vectortile-datasource/index-worker";
 import * as sinon from "sinon";
@@ -30,6 +29,7 @@ export interface GeoJsonTestOptions extends GeoJsonDataSourceTestOptions {
     dataProvider?: DataProvider;
     extraDataSource?: GeoJsonDataSourceTestOptions;
     beforeFinishCallback?: (mapView: MapView) => void;
+    size?: number;
 }
 
 function createDataSource(
@@ -103,6 +103,9 @@ export class GeoJsonTest {
         const dataSource = createDataSource("geojson", options);
 
         this.mapView.setDynamicProperty("enabled", true);
+        if (options.size) {
+            this.mapView.setDynamicProperty("size", options.size);
+        }
         await this.mapView.addDataSource(dataSource);
 
         if (options.extraDataSource) {

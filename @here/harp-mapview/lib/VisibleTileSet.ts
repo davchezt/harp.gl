@@ -962,6 +962,11 @@ export class VisibleTileSet {
                         visibleTileKeys.find(
                             tileKeyEntry =>
                                 tileKeyEntry.tileKey.mortonCode() === tileKey.mortonCode()
+                        ) === undefined &&
+                        // Check that we haven't already added this TileKey
+                        dependentTiles.find(
+                            tileKeyEntry =>
+                                tileKeyEntry.tileKey.mortonCode() === tileKey.mortonCode()
                         ) === undefined
                     ) {
                         dependentTiles.push(new TileKeyEntry(tileKey, 0));
@@ -1313,6 +1318,11 @@ export class VisibleTileSet {
             const tileKey = DataSourceCache.getKeyForTile(tile);
             if (!retainedTiles.has(tileKey)) {
                 retainedTiles.add(tileKey);
+                // We need to cancel the loader first because if we don't then the call to
+                // tileLoader.loadAndDecode() inside Tile::load will return the existing promise (if
+                // the tile is still loading) and not re-request the tile data from the provider as
+                // required.
+                tile.tileLoader?.cancel();
                 this.addToTaskQueue(tile);
             }
         };
